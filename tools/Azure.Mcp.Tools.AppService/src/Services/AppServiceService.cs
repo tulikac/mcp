@@ -517,4 +517,226 @@ public class AppServiceService(
 
         return mapFunc(jsonDoc);
     }
+
+    private static readonly string[] supportedRuntimes = ["dotnet", "node", "python", "php"];
+
+    public async Task<WebappCreateResult> CreateWebAppAsync(
+        string appName,
+        string resourceGroup,
+        string subscription,
+        string location,
+        string runtime,
+        string? sku = null,
+        string? runtimeVersion = null,
+        string? osType = null,
+        string? plan = null,
+        string? tenant = null,
+        RetryPolicyOptions? retryPolicy = null,
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation(
+            "Creating Web App {AppName} in resource group {ResourceGroup}, location {Location}",
+            appName, resourceGroup, location);
+
+        ValidateRequiredParameters(
+            (nameof(appName), appName),
+            (nameof(resourceGroup), resourceGroup),
+            (nameof(subscription), subscription),
+            (nameof(location), location),
+            (nameof(runtime), runtime));
+
+        var normalizedRuntime = runtime.ToLowerInvariant();
+        if (!supportedRuntimes.Contains(normalizedRuntime))
+        {
+            throw new ArgumentException($"Unsupported runtime: '{runtime}'. Supported runtimes: {string.Join(", ", supportedRuntimes)}");
+        }
+
+        var effectiveOsType = ResolveOsType(normalizedRuntime, osType);
+        var effectiveVersion = ResolveRuntimeVersion(normalizedRuntime, runtimeVersion);
+        var effectiveSku = sku ?? "P0V3";
+        var effectivePlanName = plan ?? $"{appName}-plan";
+
+        var subscriptionResource = await _subscriptionService.GetSubscription(subscription, tenant, retryPolicy, cancellationToken);
+
+        // Create or get resource group
+        Azure.ResourceManager.Resources.ResourceGroupResource resourceGroupResource;
+        try
+        {
+            var resourceGroupResponse = await subscriptionResource.GetResourceGroupAsync(resourceGroup, cancellationToken);
+            resourceGroupResource = resourceGroupResponse.Value;
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            _logger.LogInformation("Resource group '{ResourceGroup}' not found, creating it in {Location}", resourceGroup, location);
+            var rgData = new Azure.ResourceManager.Resources.ResourceGroupData(new Azure.Core.AzureLocation(location));
+            var rgOperation = await subscriptionResource.GetResourceGroups().CreateOrUpdateAsync(WaitUntil.Completed, resourceGroup, rgData, cancellationToken);
+            resourceGroupResource = rgOperation.Value;
+        }
+
+        // Create or reuse App Service Plan
+        var planResource = await CreateOrGetAppServicePlanAsync(
+            resourceGroupResource, effectivePlanName, location, effectiveSku, effectiveOsType, cancellationToken);
+
+        // Create Web App
+        var runtimeStack = BuildRuntimeStack(normalizedRuntime, effectiveVersion, effectiveOsType);
+        var isLinux = effectiveOsType.Equals("linux", StringComparison.OrdinalIgnoreCase);
+
+        var siteData = new WebSiteData(new Azure.Core.AzureLocation(location))
+        {
+            AppServicePlanId = planResource.Id,
+            Kind = isLinux ? "app,linux" : "app",
+            SiteConfig = new SiteConfigProperties()
+        };
+
+        if (isLinux)
+        {
+            siteData.SiteConfig.LinuxFxVersion = runtimeStack;
+        }
+        else
+        {
+            ConfigureWindowsRuntime(siteData.SiteConfig, normalizedRuntime, effectiveVersion);
+        }
+
+        var webAppCollection = resourceGroupResource.GetWebSites();
+        var webAppOperation = await webAppCollection.CreateOrUpdateAsync(WaitUntil.Started, appName, siteData, cancellationToken);
+        await WaitForLroCompletionAsync(webAppOperation, cancellationToken);
+
+        if (webAppOperation?.Value == null)
+        {
+            throw new InvalidOperationException($"Failed to create web app '{appName}'.");
+        }
+
+        var webApp = webAppOperation.Value.Data;
+
+        return new WebappCreateResult(
+            webApp.Name,
+            webApp.Id?.ToString(),
+            webApp.Location.Name,
+            webApp.State,
+            webApp.DefaultHostName,
+            webApp.Kind,
+            effectivePlanName,
+            $"{normalizedRuntime}|{effectiveVersion}",
+            effectiveOsType,
+            "Succeeded");
+    }
+
+    private static string ResolveOsType(string runtime, string? osType)
+    {
+        if (!string.IsNullOrEmpty(osType))
+        {
+            var normalized = osType.ToLowerInvariant();
+            if (normalized is not ("linux" or "windows"))
+            {
+                throw new ArgumentException($"Invalid OS type: '{osType}'. Accepted values: linux, windows.");
+            }
+
+            return normalized;
+        }
+
+        // dotnet requires explicit os-type; others default to linux
+        if (runtime == "dotnet")
+        {
+            throw new ArgumentException("The --os-type option is required for the dotnet runtime. Specify 'linux' or 'windows'.");
+        }
+
+        return "linux";
+    }
+
+    private static string ResolveRuntimeVersion(string runtime, string? runtimeVersion)
+    {
+        if (!string.IsNullOrEmpty(runtimeVersion))
+        {
+            return runtimeVersion;
+        }
+
+        return runtime switch
+        {
+            "dotnet" => "10.0",
+            "node" => "24-lts",
+            "python" => "3.14",
+            "php" => "8.5",
+            _ => throw new ArgumentException($"No default version for runtime '{runtime}'.")
+        };
+    }
+
+    private static string BuildRuntimeStack(string runtime, string version, string osType)
+    {
+        if (osType.Equals("windows", StringComparison.OrdinalIgnoreCase))
+        {
+            return runtime switch
+            {
+                "dotnet" => $"DOTNET|v{version}",
+                "node" => $"NODE|{version}",
+                "php" => $"PHP|{version}",
+                _ => throw new ArgumentException($"Runtime '{runtime}' is not supported on Windows.")
+            };
+        }
+
+        return runtime.ToUpperInvariant() + "|" + version;
+    }
+
+    private static void ConfigureWindowsRuntime(SiteConfigProperties siteConfig, string runtime, string version)
+    {
+        switch (runtime)
+        {
+            case "dotnet":
+                siteConfig.NetFrameworkVersion = $"v{version}";
+                break;
+            case "node":
+                siteConfig.NodeVersion = version;
+                break;
+            case "php":
+                siteConfig.PhpVersion = version;
+                break;
+            default:
+                throw new ArgumentException($"Runtime '{runtime}' is not supported on Windows.");
+        }
+    }
+
+    private static async Task<AppServicePlanResource> CreateOrGetAppServicePlanAsync(
+        Azure.ResourceManager.Resources.ResourceGroupResource resourceGroup,
+        string planName,
+        string location,
+        string sku,
+        string osType,
+        CancellationToken cancellationToken)
+    {
+        var planCollection = resourceGroup.GetAppServicePlans();
+
+        // Try to get existing plan
+        try
+        {
+            var existingPlan = await planCollection.GetAsync(planName, cancellationToken);
+            if (existingPlan?.Value != null)
+            {
+                return existingPlan.Value;
+            }
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            // Plan doesn't exist, create it
+        }
+
+        var isLinux = osType.Equals("linux", StringComparison.OrdinalIgnoreCase);
+
+        var planData = new AppServicePlanData(new Azure.Core.AzureLocation(location))
+        {
+            Sku = new Azure.ResourceManager.AppService.Models.AppServiceSkuDescription
+            {
+                Name = sku,
+            },
+            IsReserved = isLinux,
+        };
+
+        var planOperation = await planCollection.CreateOrUpdateAsync(WaitUntil.Started, planName, planData, cancellationToken);
+        await WaitForLroCompletionAsync(planOperation, cancellationToken);
+
+        if (planOperation?.Value == null)
+        {
+            throw new InvalidOperationException($"Failed to create App Service Plan '{planName}'.");
+        }
+
+        return planOperation.Value;
+    }
 }

@@ -75,4 +75,18 @@ public interface IAppServiceService
         string? tenant = null,
         RetryPolicyOptions? retryPolicy = null,
         CancellationToken cancellationToken = default);
+
+    Task<WebappCreateResult> CreateWebAppAsync(
+        string appName,
+        string resourceGroup,
+        string subscription,
+        string location,
+        string runtime,
+        string? sku = null,
+        string? runtimeVersion = null,
+        string? osType = null,
+        string? plan = null,
+        string? tenant = null,
+        RetryPolicyOptions? retryPolicy = null,
+        CancellationToken cancellationToken = default);
 }

@@ -18,6 +18,12 @@ public static class AppServiceOptionDefinitions
     public const string StartTimeName = "start-time";
     public const string EndTimeName = "end-time";
     public const string IntervalName = "interval";
+    public const string LocationName = "location";
+    public const string SkuName = "sku";
+    public const string RuntimeName = "runtime";
+    public const string RuntimeVersionName = "runtime-version";
+    public const string OsTypeName = "os-type";
+    public const string PlanName = "plan";
 
     public static readonly Option<string> AppServiceName = new($"--{AppName}")
     {
@@ -94,6 +100,42 @@ public static class AppServiceOptionDefinitions
     public static readonly Option<string> Interval = new($"--{IntervalName}")
     {
         Description = "The time interval (e.g., PT1H for 1 hour, PT5M for 5 minutes).",
+        Required = false
+    };
+
+    public static readonly Option<string> Location = new($"--{LocationName}")
+    {
+        Description = "The Azure region for the App Service (e.g., eastus, westeurope, canadacentral). Defaults to canadacentral if not specified.",
+        Required = false
+    };
+
+    public static readonly Option<string> Sku = new($"--{SkuName}")
+    {
+        Description = "The pricing SKU for the App Service Plan (e.g., F1, B1, S1, P0V3). Defaults to P0V3 if not specified.",
+        Required = false
+    };
+
+    public static readonly Option<string> Runtime = new($"--{RuntimeName}")
+    {
+        Description = "The application runtime stack. Accepted values: dotnet, node, python, php.",
+        Required = false
+    };
+
+    public static readonly Option<string> RuntimeVersion = new($"--{RuntimeVersionName}")
+    {
+        Description = "The runtime version (e.g., 10.0 for dotnet, 24-lts for node). Defaults to the latest version for the selected runtime.",
+        Required = false
+    };
+
+    public static readonly Option<string> OsType = new($"--{OsTypeName}")
+    {
+        Description = "The operating system type. Accepted values: linux, windows. Required for dotnet runtime; defaults to linux for node, python, and php.",
+        Required = false
+    };
+
+    public static readonly Option<string> Plan = new($"--{PlanName}")
+    {
+        Description = "The name of the App Service Plan. If not specified, a plan named '{app-name}-plan' will be created or reused.",
         Required = false
     };
 }
